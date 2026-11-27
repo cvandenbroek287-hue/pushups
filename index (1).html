@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Push-up alarm</title>
+<style>
+  :root { --bg:#111; --fg:#f5f5f5; --muted:#999; --accent:#3ddc84; --warn:#ffb020; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,system-ui,sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); text-align:center; }
+  #count { font-size:96px; font-weight:700; line-height:1; margin-top:8px; }
+  #of { color:var(--muted); font-size:20px; margin-bottom:12px; }
+  .stage { position:relative; width:100%; aspect-ratio:3/4; background:#000; border-radius:12px; overflow:hidden; }
+  video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  #status { margin:12px 0; min-height:2.6em; color:var(--muted); font-size:15px; }
+  button { font-size:18px; padding:14px 22px; border-radius:12px; border:0; background:var(--accent); color:#000; font-weight:600; width:100%; margin-top:8px; }
+  button.secondary { background:#333; color:var(--fg); }
+  .done #count { color:var(--accent); }
+  .tips { text-align:left; color:var(--muted); font-size:14px; margin-top:16px; }
+</style>
+</head>
+<body>
+<main id="app">
+  <div id="count">0</div>
+  <div id="of">of 15 push-ups</div>
+  <div class="stage"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
+  <div id="status">Tap Start, then place the phone on the floor, side-on to you.</div>
+  <button id="start">Start camera</button>
+  <button id="finish" class="secondary" hidden>Turn off the alarm</button>
+  <div class="tips">
+    Prop the phone on the floor about 1.5–2 m away, screen facing you, so the camera sees your whole body from the side. Good light helps.
+  </div>
+</main>
+
+<script type="module">
+import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+
+const params = new URLSearchParams(location.search);
+const TARGET = Math.max(1, parseInt(params.get("reps") || "15", 10));
+const SHORTCUT = params.get("sc") || "PushupDone";   // name of the Shortcut to run when finished
+const DOWN_ANGLE = parseInt(params.get("down") || "110", 10);  // elbow angle counted as "down"
+const UP_ANGLE = parseInt(params.get("up") || "150", 10);      // elbow angle counted as "up"
+const MIN_VIS = parseFloat(params.get("vis") || "0.3");        // min landmark confidence
+const STRICT = params.get("strict") === "1";                   // require horizontal body
+
+const $ = (id) => document.getElementById(id);
+const video = $("v"), canvas = $("c"), ctx = canvas.getContext("2d");
+let count = 0, state = "up", smooth = null, landmarker = null, audio = null, finished = false, lastTime = -1;
+
+$("of").textContent = "of " + TARGET + " push-ups";
+
+function setStatus(t) { $("status").textContent = t; }
+
+function beep(freq = 880, ms = 120) {
+  try {
+    if (!audio) return;
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.frequency.value = freq; g.gain.value = 0.15;
+    o.connect(g); g.connect(audio.destination);
+    o.start(); o.stop(audio.currentTime + ms / 1000);
+  } catch (e) {}
+}
+
+function angle(a, b, c, w, h) {
+  const v1 = [(a.x - b.x) * w, (a.y - b.y) * h];
+  const v2 = [(c.x - b.x) * w, (c.y - b.y) * h];
+  const dot = v1[0] * v2[0] + v1[1] * v2[1];
+  const m = Math.hypot(...v1) * Math.hypot(...v2);
+  if (!m) return null;
+  return Math.acos(Math.max(-1, Math.min(1, dot / m))) * 180 / Math.PI;
+}
+
+function finish() {
+  if (finished) return;
+  finished = true;
+  document.body.classList.add("done");
+  setStatus("Done! Turning off the alarm...");
+  beep(660, 200); setTimeout(() => beep(990, 300), 250);
+  $("finish").hidden = false;
+  setTimeout(runShortcut, 1200);
+}
+
+function runShortcut() {
+  location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT);
+}
+$("finish").addEventListener("click", runShortcut);
+
+function process(lm, w, h) {
+  const sides = [
+    { s: lm[11], e: lm[13], w: lm[15], hip: lm[23] },
+    { s: lm[12], e: lm[14], w: lm[16], hip: lm[24] },
+  ];
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const seen = [];
+  for (const sd of sides) {
+    const v = (sd.s.visibility + sd.e.visibility + sd.w.visibility) / 3;
+    const ok = v >= MIN_VIS;
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = ctx.fillStyle = ok ? "#3ddc84" : "#ff5a5a";
+    ctx.beginPath();
+    [sd.s, sd.e, sd.w].forEach((p, i) => {
+      const x = p.x * canvas.width, y = p.y * canvas.height;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+    [sd.s, sd.e, sd.w].forEach((p) => {
+      ctx.beginPath(); ctx.arc(p.x * canvas.width, p.y * canvas.height, 7, 0, 7); ctx.fill();
+    });
+    if (ok) {
+      const a = angle(sd.s, sd.e, sd.w, w, h);
+      if (a !== null) seen.push({ a, v, sd });
+    }
+  }
+  if (!seen.length) { setStatus("Can't see your arms clearly. Move back a bit or add light."); return; }
+
+  if (STRICT) {
+    const best = seen.reduce((x, y) => (y.v > x.v ? y : x));
+    const horizontal = Math.abs(best.sd.s.x - best.sd.hip.x) * w > Math.abs(best.sd.s.y - best.sd.hip.y) * h;
+    if (!horizontal) { setStatus("Get into push-up position."); state = "up"; return; }
+  }
+
+  // Average the visible arms, weighted by confidence
+  const total = seen.reduce((t, x) => t + x.v, 0);
+  const a = seen.reduce((t, x) => t + x.a * x.v, 0) / total;
+  smooth = smooth === null ? a : smooth * 0.5 + a * 0.5;
+
+  if (state === "up" && smooth < DOWN_ANGLE) {
+    state = "down";
+  } else if (state === "down" && smooth > UP_ANGLE) {
+    state = "up";
+    count++;
+    $("count").textContent = count;
+    beep();
+    if (count >= TARGET) { finish(); return; }
+  }
+  setStatus((state === "down" ? "Down... push up!" : "Go down...") +
+    "  angle " + Math.round(smooth) + "°, arms seen " + seen.length +
+    " (down<" + DOWN_ANGLE + ", up>" + UP_ANGLE + ")");
+}
+
+function loop() {
+  if (!landmarker || finished) return;
+  if (video.readyState >= 2 && video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const res = landmarker.detectForVideo(video, performance.now());
+    if (res.landmarks && res.landmarks[0]) {
+      process(res.landmarks[0], video.videoWidth, video.videoHeight);
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      setStatus("No body detected. Step back so your whole body is in view.");
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+async function makeLandmarker() {
+  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const modelAssetPath = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+  for (const delegate of ["GPU", "CPU"]) {
+    try {
+      return await PoseLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath, delegate },
+        runningMode: "VIDEO",
+        numPoses: 1,
+      });
+    } catch (e) { console.warn("Delegate failed:", delegate, e); }
+  }
+  throw new Error("Could not load the pose model.");
+}
+
+$("start").addEventListener("click", async () => {
+  $("start").disabled = true;
+  try {
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+    try { await navigator.wakeLock.request("screen"); } catch (e) {}
+    setStatus("Starting camera...");
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    setStatus("Loading pose model (needs internet the first time)...");
+    landmarker = await makeLandmarker();
+    $("start").hidden = true;
+    setStatus("Get into push-up position, side-on to the camera.");
+    loop();
+  } catch (e) {
+    console.error(e);
+    setStatus("Error: " + (e.message || e) + ". Check camera permission for Safari and your internet connection.");
+    $("start").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
