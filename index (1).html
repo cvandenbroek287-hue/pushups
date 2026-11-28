@@ -39,9 +39,9 @@ import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@m
 const params = new URLSearchParams(location.search);
 const TARGET = Math.max(1, parseInt(params.get("reps") || "15", 10));
 const SHORTCUT = params.get("sc") || "PushupDone";   // name of the Shortcut to run when finished
-const DOWN_ANGLE = parseInt(params.get("down") || "110", 10);  // elbow angle counted as "down"
-const UP_ANGLE = parseInt(params.get("up") || "150", 10);      // elbow angle counted as "up"
-const MIN_VIS = parseFloat(params.get("vis") || "0.3");        // min landmark confidence
+const DOWN_ANGLE = parseInt(params.get("down") || "100", 10);  // elbow angle counted as "down"
+const UP_ANGLE = parseInt(params.get("up") || "155", 10);      // elbow angle counted as "up"
+const MIN_VIS = parseFloat(params.get("vis") || "0.5");        // min landmark confidence
 const STRICT = params.get("strict") === "1";                   // require horizontal body
 
 const $ = (id) => document.getElementById(id);
